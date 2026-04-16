@@ -5,11 +5,13 @@ set -euo pipefail
 DEFAULT_SSH_PORT=2222
 DEFAULT_HOSTNAME=""
 DEFAULT_LOCAL_IPADDRESS=""
+DEFAULT_SWAPSIZE=""
 
 # Argument parsing
 SSH_PORT=$DEFAULT_SSH_PORT
 HOSTNAME=$DEFAULT_HOSTNAME
 LOCAL_IPADDRESS=$DEFAULT_LOCAL_IPADDRESS
+SWAPSIZE=$DEFAULT_SWAPSIZE
 
 # Help display function
 show_help() {
@@ -20,6 +22,7 @@ Options:
     --ssh-port PORT     Specify SSH port (default: $DEFAULT_SSH_PORT)
     --hostname NAME     Specify hostname (default: no change)
     --local-ipaddress IP/PREFIX    Local IP address with prefix (e.g., 192.168.100.1/24)
+    --swapsize SIZE     Create swap file with specified size in GB (e.g., 16)
     -h, --help         Show this help
 
 Examples:
@@ -32,8 +35,11 @@ Examples:
     # With local IP address
     $0 --ssh-port 2222 --hostname k3s-node-01 --local-ipaddress 192.168.100.1/24
 
+    # With swap file creation
+    $0 --ssh-port 2222 --hostname k3s-node-01 --swapsize 16
+
     # When running from curl
-    curl -fsSL https://raw.githubusercontent.com/miiton/ubuntu-setup/refs/heads/main/k3s-node_ubuntu24.04.sh | bash -s -- --ssh-port 2222 --hostname k3s-node-01 --local-ipaddress 192.168.100.1/24
+    curl -fsSL https://raw.githubusercontent.com/miiton/ubuntu-setup/refs/heads/main/k3s-node_ubuntu24.04.sh | bash -s -- --ssh-port 2222 --hostname k3s-node-01 --local-ipaddress 192.168.100.1/24 --swapsize 16
 
 EOF
 }
@@ -51,6 +57,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --local-ipaddress)
             LOCAL_IPADDRESS="$2"
+            shift 2
+            ;;
+        --swapsize)
+            SWAPSIZE="$2"
             shift 2
             ;;
         -h|--help)
@@ -103,6 +113,14 @@ if [[ -n "$LOCAL_IPADDRESS" ]]; then
     done
 fi
 
+# Validate swap size
+if [[ -n "$SWAPSIZE" ]]; then
+    if ! [[ "$SWAPSIZE" =~ ^[0-9]+$ ]] || [ "$SWAPSIZE" -lt 1 ] || [ "$SWAPSIZE" -gt 128 ]; then
+        echo "Error: Swap size must be a number between 1 and 128 GB"
+        exit 1
+    fi
+fi
+
 # Log all output
 exec > >(tee -a /var/log/k3s-node-setup.log)
 exec 2>&1
@@ -115,6 +133,7 @@ echo "  Local IP Address: ${LOCAL_IPADDRESS:-"(no local IP address)"}"
 if [[ -n "$LOCAL_IPADDRESS" ]]; then
     echo "  Static IP: ${STATIC_IP}/${PREFIX}"
 fi
+echo "  Swap Size: ${SWAPSIZE:-"(disabled)"}${SWAPSIZE:+ GB}"
 echo "========================================="
 
 # Hostname configuration
@@ -167,9 +186,29 @@ if command -v ufw &> /dev/null; then
     systemctl disable ufw
 fi
 
-# Disable swap for k3s
-swapoff -a
-sed -i '/ swap / s/^/#/' /etc/fstab
+# Configure swap
+if [[ -n "$SWAPSIZE" ]]; then
+    echo "Creating swap file of ${SWAPSIZE}GB..."
+    # Turn off existing swap
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
+    
+    # Create new swap file
+    fallocate -l "${SWAPSIZE}G" /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    
+    # Add to fstab for persistence
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    
+    echo "Swap file created and enabled: ${SWAPSIZE}GB"
+else
+    echo "Disabling swap..."
+    # Disable swap for k3s
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
+fi
 
 # Load required kernel modules first
 cat > /etc/modules-load.d/k3s.conf <<EOF
